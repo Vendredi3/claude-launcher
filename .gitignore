@@ -1,0 +1,22 @@
+# Windows
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# IDE / editors
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+
+# PowerShell
+*.ps1xml.bak
+
+# Local user config (paths, exclusions, etc.) — ship config.example.json instead.
+# The script auto-creates config.json from defaults on first run.
+config.json
+
+# Startup shortcut created by Install-Startup.ps1 lives in the user's
+# Windows Startup folder, not in the project — nothing to ignore here.

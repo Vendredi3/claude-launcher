@@ -1,0 +1,7 @@
+{
+    "ProjectsRoot":     "C:\\wamp64\\www",
+    "SearchDepth":      1,
+    "ExcludeFolders":   ["Z_claude_launcher", ".git", "node_modules", "vendor"],
+    "ClaudeCommand":    "claude",
+    "ChromeUrlPattern": "http://127.0.0.1/{name}"
+}
