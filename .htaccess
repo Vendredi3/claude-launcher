@@ -1,0 +1,7 @@
+# Bloquer l'accès HTTP aux fichiers .md
+<FilesMatch "\.md$">
+    Require all denied
+</FilesMatch>
+
+# Bloquer l'accès HTTP au répertoire .git (404 pour masquer son existence)
+RedirectMatch 404 /\.git

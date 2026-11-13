@@ -95,7 +95,7 @@ $form.KeyPreview      = $true
 $form.BackColor       = [System.Drawing.Color]::FromArgb(245, 245, 245)
 
 $label = New-Object System.Windows.Forms.Label
-$label.Text     = "Entree = Claude  -  Ctrl+Entree = Chrome http://127.0.0.1/...  -  Echap = fermer"
+$label.Text     = "Entree = Claude  -  Ctrl+Entree = Chrome  -  Shift+Entree = Explorateur  -  Echap = fermer"
 $label.Location = New-Object System.Drawing.Point(12, 8)
 $label.Size     = New-Object System.Drawing.Size(490, 18)
 $label.ForeColor = [System.Drawing.Color]::Gray
@@ -263,6 +263,15 @@ function Open-InChrome {
     $form.Hide()
 }
 
+function Open-InExplorer {
+    if ($listbox.SelectedIndex -lt 0) { return }
+    $name = $listbox.SelectedItem
+    $entry = $script:AllFolders | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    if (-not $entry) { return }
+    Start-Process explorer.exe $entry.Path
+    $form.Hide()
+}
+
 function Show-Launcher {
     Refresh-Folders
     $textbox.Text = ""
@@ -292,9 +301,11 @@ $form.Add_KeyDown({
         $_.Handled = $true
         $_.SuppressKeyPress = $true
         if ($_.Control) {
-            Open-InChrome      # Ctrl+Entree => Chrome http://127.0.0.1/<dossier>
+            Open-InChrome      # Ctrl+Entree  => Chrome http://127.0.0.1/<dossier>
+        } elseif ($_.Shift) {
+            Open-InExplorer    # Shift+Entree => Explorateur Windows dans le dossier
         } else {
-            Launch-Selected    # Entree      => PowerShell + claude dans le dossier
+            Launch-Selected    # Entree       => PowerShell + claude dans le dossier
         }
     }
     elseif ($k -eq $Keys::Escape) {
@@ -322,6 +333,24 @@ $form.Add_KeyDown({
 })
 
 $listbox.Add_DoubleClick({ Launch-Selected })
+
+# Clic droit sur un element : le selectionne et copie son chemin complet
+$listbox.Add_MouseDown({
+    param($s, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right) { return }
+    $idx = $listbox.IndexFromPoint($e.Location)
+    if ($idx -lt 0 -or $idx -ge $listbox.Items.Count) { return }
+    $listbox.SelectedIndex = $idx
+    $name  = [string]$listbox.Items[$idx]
+    $entry = $script:AllFolders | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    if (-not $entry) { return }
+    try {
+        [System.Windows.Forms.Clipboard]::SetText($entry.Path)
+        $status.Text = "Chemin copie : $($entry.Path)"
+    } catch {
+        $status.Text = "Echec de la copie : $($_.Exception.Message)"
+    }
+})
 
 $form.Add_Deactivate({ $form.Hide() })
 $form.Add_FormClosing({
