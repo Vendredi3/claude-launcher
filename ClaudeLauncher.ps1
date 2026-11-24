@@ -1,6 +1,6 @@
 # =================================================================
 #  Claude Launcher - tray application
-#  Tape quelques lettres, filtre tes projets dans C:\wamp64\www,
+#  Tape quelques lettres, filtre tes projets (ProjectsRoot),
 #  Entree => ouvre PowerShell + claude dans le dossier choisi.
 # =================================================================
 
@@ -13,6 +13,22 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# ----- Instance unique ------------------------------------------
+# Un mutex nomme empeche de lancer deux fois l'app (deux icones dans la traybar).
+$script:Mutex = New-Object System.Threading.Mutex($false, "Local\ClaudeLauncher_SingleInstance")
+$hasMutex = $false
+try {
+    $hasMutex = $script:Mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    $hasMutex = $true   # l'instance precedente a plante sans liberer le mutex
+}
+if (-not $hasMutex) {
+    [System.Windows.Forms.MessageBox]::Show(
+        "Claude Launcher est deja lance (voir la zone de notification).",
+        "Claude Launcher", 'OK', 'Information') | Out-Null
+    exit
+}
+
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $IconPath   = Join-Path $ScriptDir "icon.ico"
 $ConfigPath = Join-Path $ScriptDir "config.json"
@@ -21,7 +37,7 @@ $ConfigPath = Join-Path $ScriptDir "config.json"
 $DefaultConfig = [ordered]@{
     ProjectsRoot     = "C:\wamp64\www"
     SearchDepth      = 1
-    ExcludeFolders   = @("Z_claude_launcher", ".git", "node_modules", "vendor")
+    ExcludeFolders   = @(".git", "node_modules", "vendor")   # le dossier du launcher est exclu automatiquement
     ClaudeCommand    = "claude"
     ChromeUrlPattern = "http://127.0.0.1/{name}"
 }
@@ -58,8 +74,11 @@ function Load-Config {
 }
 
 $cfg              = Load-Config
-$ProjectsRoot     = [string]$cfg.ProjectsRoot
-$SearchDepth      = [int]$cfg.SearchDepth
+$ProjectsRoot     = ([string]$cfg.ProjectsRoot).TrimEnd('\', '/')
+if ($ProjectsRoot -match ':$') { $ProjectsRoot += '\' }   # racine de lecteur : "C:" -> "C:\"
+# SearchDepth : au minimum 1 (0 ou negatif ferait planter Get-ChildItem -Depth)
+$SearchDepth      = 1
+try { $SearchDepth = [Math]::Max(1, [int]$cfg.SearchDepth) } catch { $SearchDepth = 1 }
 $ExcludeFolders   = @($cfg.ExcludeFolders)
 $ClaudeCommand    = [string]$cfg.ClaudeCommand
 $ChromeUrlPattern = [string]$cfg.ChromeUrlPattern
@@ -147,7 +166,7 @@ $listbox.Add_DrawItem({
     $brushBg.Dispose()
 
     # Texte avec padding gauche
-    $text = [string]$listbox.Items[$e.Index]
+    $text = [string]$listbox.Items[$e.Index].Display
     $brushFg = New-Object System.Drawing.SolidBrush($fg)
     $textRect = New-Object System.Drawing.RectangleF(
         ([single]($e.Bounds.X + 10)),
@@ -169,55 +188,84 @@ $form.Controls.Add($status)
 $script:AllFolders = @()
 
 function Refresh-Folders {
-    if (-not (Test-Path $ProjectsRoot)) {
-        $script:AllFolders = @()
-        return
-    }
-    $script:AllFolders = Get-ChildItem -Path $ProjectsRoot -Directory -Depth ($SearchDepth - 1) -ErrorAction SilentlyContinue |
-        Where-Object { $ExcludeFolders -notcontains $_.Name } |
-        Sort-Object Name |
-        ForEach-Object {
-            [PSCustomObject]@{
-                Name = $_.Name
-                Path = $_.FullName
+    $list = New-Object System.Collections.Generic.List[object]
+    if (Test-Path -LiteralPath $ProjectsRoot) {
+        $selfDir = $ScriptDir.TrimEnd('\')
+        # Parcours manuel : on ne descend PAS dans les dossiers exclus
+        # (node_modules, vendor...) et le dossier du launcher est toujours ignore.
+        # Le chemin relatif est construit au fil du parcours (pas de Substring :
+        # chemin court "UTILIS~1" vs chemin long ne font pas la meme longueur).
+        $walk = {
+            param([string]$dir, [int]$level, [string]$prefix)
+            Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($ExcludeFolders -contains $_.Name) { return }
+                # Dossier du launcher : par chemin, ou par la presence du script
+                # (couvre le cas chemin court / chemin long)
+                if ($_.FullName.TrimEnd('\') -ieq $selfDir -or
+                    (Test-Path -LiteralPath (Join-Path $_.FullName 'ClaudeLauncher.ps1'))) { return }
+                $rel = if ($prefix) { "$prefix\$($_.Name)" } else { $_.Name }
+                $list.Add([PSCustomObject]@{
+                    Name    = $_.Name
+                    Path    = $_.FullName
+                    RelPath = $rel
+                    # Avec SearchDepth > 1, on affiche le chemin relatif pour
+                    # distinguer les homonymes (deux "src", deux "app"...).
+                    Display = $(if ($SearchDepth -gt 1) { $rel } else { $_.Name })
+                })
+                if ($level -lt $SearchDepth) { & $walk $_.FullName ($level + 1) $rel }
             }
         }
+        & $walk $ProjectsRoot 1 ''
+    }
+    $script:AllFolders = @($list | Sort-Object Display)
 }
 
 function Update-List {
     param([string]$Filter)
     $listbox.BeginUpdate()
-    $listbox.Items.Clear()
-    $needle = $Filter.Trim()
-    if ([string]::IsNullOrEmpty($needle)) {
-        $matches = $script:AllFolders
-    } else {
-        $matches = $script:AllFolders | Where-Object { $_.Name -like "*$needle*" }
+    try {
+        $listbox.Items.Clear()
+        $needle = $Filter.Trim()
+        if ([string]::IsNullOrEmpty($needle)) {
+            $found = $script:AllFolders
+        } else {
+            # Recherche litterale (pas de -like : "[" ou "*" casseraient le filtre)
+            $found = $script:AllFolders | Where-Object {
+                $_.Display.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            }
+        }
+        foreach ($m in $found) { [void]$listbox.Items.Add($m) }
+        if ($listbox.Items.Count -gt 0) { $listbox.SelectedIndex = 0 }
+    } finally {
+        $listbox.EndUpdate()
     }
-    foreach ($m in $matches) { [void]$listbox.Items.Add($m.Name) }
-    if ($listbox.Items.Count -gt 0) { $listbox.SelectedIndex = 0 }
-    $listbox.EndUpdate()
     $status.Text = "$($listbox.Items.Count) dossier(s)  /  total: $($script:AllFolders.Count)"
 }
 
+function Get-SelectedEntry {
+    if ($listbox.SelectedIndex -lt 0) { return $null }
+    return $listbox.SelectedItem
+}
+
 function Launch-Selected {
-    if ($listbox.SelectedIndex -lt 0) { return }
-    $name = $listbox.SelectedItem
-    $entry = $script:AllFolders | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    $entry = Get-SelectedEntry
     if (-not $entry) { return }
     $path = $entry.Path
 
     $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
     if ($wt) {
-        # Windows Terminal : ouvre un onglet PowerShell dans le dossier et lance claude
+        # Windows Terminal : ouvre un onglet PowerShell dans le dossier et lance claude.
+        # wt interprete ";" comme separateur de commandes : on l'echappe en "\;".
+        $cmd = $ClaudeCommand -replace ';', '\;'
         Start-Process -FilePath "wt.exe" -ArgumentList @(
             "-d", "`"$path`"",
-            "powershell.exe", "-NoExit", "-Command", $ClaudeCommand
+            "powershell.exe", "-NoExit", "-Command", $cmd
         )
     } else {
-        Start-Process -FilePath "powershell.exe" -ArgumentList @(
-            "-NoExit", "-Command",
-            "Set-Location -LiteralPath '$path'; $ClaudeCommand"
+        # Le dossier est passe via -WorkingDirectory : aucun souci d'apostrophe
+        # ou de caractere special dans le chemin.
+        Start-Process -FilePath "powershell.exe" -WorkingDirectory $path -ArgumentList @(
+            "-NoExit", "-Command", $ClaudeCommand
         )
     }
     $form.Hide()
@@ -255,20 +303,20 @@ function Start-Chrome {
 }
 
 function Open-InChrome {
-    if ($listbox.SelectedIndex -lt 0) { return }
-    $name = $listbox.SelectedItem
-    # Pattern issu de config.json (placeholder {name} remplace par le dossier)
-    $url  = $ChromeUrlPattern -replace '\{name\}', [string]$name
+    $entry = Get-SelectedEntry
+    if (-not $entry) { return }
+    # Pattern issu de config.json : {name} est remplace par le chemin relatif
+    # du dossier (segments encodes pour l'URL, separateur "/").
+    $urlPath = ($entry.RelPath -split '\\' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+    $url     = $ChromeUrlPattern.Replace('{name}', $urlPath)
     Start-Chrome -Url $url
     $form.Hide()
 }
 
 function Open-InExplorer {
-    if ($listbox.SelectedIndex -lt 0) { return }
-    $name = $listbox.SelectedItem
-    $entry = $script:AllFolders | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    $entry = Get-SelectedEntry
     if (-not $entry) { return }
-    Start-Process explorer.exe $entry.Path
+    Start-Process explorer.exe "`"$($entry.Path)`""
     $form.Hide()
 }
 
@@ -276,8 +324,9 @@ function Show-Launcher {
     Refresh-Folders
     $textbox.Text = ""
     Update-List ""
-    # Place la fenetre en bas a droite, pres de la traybar
-    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    # Place la fenetre en bas a droite de l'ecran ou se trouve la souris
+    # (= celui de la traybar cliquee, utile en multi-ecran)
+    $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
     $form.Location = New-Object System.Drawing.Point(
         ($wa.Right  - $form.Width  - 12),
         ($wa.Bottom - $form.Height - 12)
@@ -341,8 +390,7 @@ $listbox.Add_MouseDown({
     $idx = $listbox.IndexFromPoint($e.Location)
     if ($idx -lt 0 -or $idx -ge $listbox.Items.Count) { return }
     $listbox.SelectedIndex = $idx
-    $name  = [string]$listbox.Items[$idx]
-    $entry = $script:AllFolders | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+    $entry = $listbox.Items[$idx]
     if (-not $entry) { return }
     try {
         [System.Windows.Forms.Clipboard]::SetText($entry.Path)
@@ -368,12 +416,13 @@ $notify.Add_MouseClick({
 })
 
 $mOpen.Add_Click({ Show-Launcher })
-$mRoot.Add_Click({ Start-Process explorer.exe $ProjectsRoot })
+$mRoot.Add_Click({ Start-Process explorer.exe "`"$ProjectsRoot`"" })
 $mLocal.Add_Click({ Start-Chrome -Url "http://127.0.0.1" })
 $mRefresh.Add_Click({ Refresh-Folders; $status.Text = "Liste rafraichie ($($script:AllFolders.Count) dossiers)" })
 $mExit.Add_Click({
     $notify.Visible = $false
     $notify.Dispose()
+    try { $script:Mutex.ReleaseMutex() } catch {}
     [System.Windows.Forms.Application]::Exit()
 })
 
