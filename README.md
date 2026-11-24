@@ -7,7 +7,7 @@ A tiny Windows tray app that opens [Claude Code](https://www.anthropic.com/claud
 ## Why?
 
 If you work on dozens of small projects living in the same root folder
-(`C:\wamp64\www`, `C:\src`, `~/projects`, whatever), opening a terminal in
+(`C:\wamp64\www`, `C:\laragon\www`, `C:\src`, `~/projects`, whatever), opening a terminal in
 the right one is the same boring dance every time: open PowerShell, `cd ...`,
 then run your tool. This app removes the dance.
 
@@ -23,15 +23,19 @@ folder name, hit `Enter`. Done.
   (or PowerShell as fallback) in the selected folder and runs `claude`
   (or any command you configure).
 - **`Ctrl+Enter`** opens Chrome on a URL pattern that includes the folder name
-  — handy for WAMP/XAMPP setups where each project has its own local URL.
+  — handy for WAMP/XAMPP/Laragon setups where each project has its own local URL.
+- **`Shift+Enter`** opens the selected folder in Windows Explorer.
+- **Right-click** an item to copy its full path to the clipboard.
+- **Single instance** — launching it twice won't give you two tray icons.
 - **External JSON config** — root folder, exclusions, command, URL pattern.
-- **No dependencies** — pure PowerShell + WinForms. ~300 lines, single file.
+- **No dependencies** — pure PowerShell + WinForms. ~430 lines, single file.
 
 ## Install
 
 1. Clone the repo (or download the ZIP) into a folder of your choice. The
-   defaults assume `C:\wamp64\www\Z_claude_launcher`, but anywhere works
-   (just update `ProjectsRoot` in your `config.json`).
+   defaults assume projects live in `C:\wamp64\www`, but anywhere works
+   (just update `ProjectsRoot` in your `config.json`). The launcher's own
+   folder is automatically left out of the list.
 2. Set up your config — either copy the template:
    ```powershell
    Copy-Item config.example.json config.json
@@ -44,19 +48,26 @@ folder name, hit `Enter`. Done.
 4. *(Optional)* Right-click **`Install-Startup.ps1`** → **Run with PowerShell**
    to launch automatically with Windows.
 
-> **First run blocked by execution policy?** Open PowerShell and run
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Then retry.
+> `Start-Hidden.vbs` and `Start-Debug.bat` already pass `-ExecutionPolicy Bypass`.
+> If you run `ClaudeLauncher.ps1` directly and it's blocked, run
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
+
+> **Installed inside your web root?** The shipped `.htaccess` denies all HTTP
+> access to the folder (Apache), so `config.json` and the scripts aren't served.
 
 ## Usage
 
-**Click** the tray icon to open the search window in the bottom-right corner.
+**Click** the tray icon to open the search window in the bottom-right corner
+(of the screen the mouse is on).
 
 | Key                  | Action                                                                  |
 |----------------------|-------------------------------------------------------------------------|
-| Type letters         | Filters the project list in real time.                                  |
+| Type letters         | Filters the project list in real time (plain substring, case-insensitive). |
 | `Up` / `Down`        | Navigate the list.                                                      |
 | `Enter`              | Open Windows Terminal in the selected folder and run `claude`.          |
 | `Ctrl+Enter`         | Open Chrome on `http://127.0.0.1/<folder-name>` (URL pattern configurable). |
+| `Shift+Enter`        | Open the selected folder in Windows Explorer.                           |
+| Right-click an item  | Select it and copy its full path to the clipboard.                      |
 | `Escape` / click out | Hide the window (app stays in the tray).                                |
 
 **Right-click** the tray icon for the menu:
@@ -77,7 +88,7 @@ Copy it (or let the script auto-create one) and edit freely:
 {
     "ProjectsRoot":     "C:\\wamp64\\www",
     "SearchDepth":      1,
-    "ExcludeFolders":   ["Z_claude_launcher", ".git", "node_modules", "vendor"],
+    "ExcludeFolders":   [".git", "node_modules", "vendor"],
     "ClaudeCommand":    "claude",
     "ChromeUrlPattern": "http://127.0.0.1/{name}"
 }
@@ -86,10 +97,10 @@ Copy it (or let the script auto-create one) and edit freely:
 | Key                | What it does                                                                        |
 |--------------------|-------------------------------------------------------------------------------------|
 | `ProjectsRoot`     | Folder to scan for projects. JSON-escape backslashes: `C:\\path\\to\\projects`.     |
-| `SearchDepth`      | `1` = direct subfolders only; `2` = one level deeper; etc.                          |
-| `ExcludeFolders`   | Folder names to skip (matched by basename, not path).                               |
+| `SearchDepth`      | `1` = direct subfolders only; `2` = one level deeper; etc. Minimum `1`. With `2`+, the list shows relative paths (`app1\src`) so same-named folders stay distinct. |
+| `ExcludeFolders`   | Folder names to skip (matched by basename, not path). Excluded folders are not descended into. The launcher's own folder is always skipped. |
 | `ClaudeCommand`    | Command to run after `cd`-ing into the project. Defaults to `claude`. Could be `code .`, `gemini`, `cursor .`, etc. |
-| `ChromeUrlPattern` | URL opened by `Ctrl+Enter`. The placeholder `{name}` is replaced by the folder name. |
+| `ChromeUrlPattern` | URL opened by `Ctrl+Enter`. The placeholder `{name}` is replaced by the folder's path relative to `ProjectsRoot`, URL-encoded, with `/` separators. |
 
 If `config.json` is missing, it's created from defaults on next run. If the
 JSON is invalid, you get a non-blocking warning and the defaults are used.
@@ -100,7 +111,7 @@ then relaunch `Start-Hidden.vbs`) to apply changes.
 ## File layout
 
 ```
-Z_claude_launcher/
+claude-launcher/
 ├── ClaudeLauncher.ps1      # main script (tray app, search window, keybindings)
 ├── config.example.json     # template — copy to config.json on first install
 ├── config.json             # your settings (git-ignored, auto-created if missing)
@@ -110,6 +121,7 @@ Z_claude_launcher/
 ├── Install-Startup.ps1     # adds a shortcut to %APPDATA%\...\Startup
 ├── screenshot.png          # for this README
 ├── LICENSE
+├── .htaccess               # denies HTTP access when installed in a web root
 ├── .gitignore
 └── README.md
 ```
@@ -119,7 +131,8 @@ Z_claude_launcher/
 A single PowerShell script bootstraps a Windows Forms `NotifyIcon` and keeps a
 hidden top-most window around. The window only shows when you click the tray
 icon. The list of folders is enumerated once on show (and on demand via the
-right-click menu) using `Get-ChildItem -Depth`. The keyboard handling lives at
+right-click menu) by walking the tree up to `SearchDepth`, skipping excluded
+folders. A named mutex prevents a second instance from starting. The keyboard handling lives at
 the form level (`KeyPreview = $true`) so `Enter`, `Escape`, and arrow keys
 work regardless of which control has focus. The list is rendered in
 owner-draw mode for the alternating-row look.

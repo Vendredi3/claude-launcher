@@ -1,7 +1,6 @@
-# Bloquer l'accès HTTP aux fichiers .md
-<FilesMatch "\.md$">
-    Require all denied
-</FilesMatch>
+# Ce dossier n'a rien a servir en HTTP (outil Windows local) : on bloque tout,
+# y compris config.json, les scripts .ps1 et .idea/.
+Require all denied
 
-# Bloquer l'accès HTTP au répertoire .git (404 pour masquer son existence)
+# .git : 404 plutot que 403, pour masquer son existence
 RedirectMatch 404 /\.git
