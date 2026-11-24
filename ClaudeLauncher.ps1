@@ -40,6 +40,7 @@ $DefaultConfig = [ordered]@{
     ExcludeFolders   = @(".git", "node_modules", "vendor")   # le dossier du launcher est exclu automatiquement
     ClaudeCommand    = "claude"
     ChromeUrlPattern = "http://127.0.0.1/{name}"
+    HideAutomatedSessions = $true   # masque les sessions lancees par script (claude -p)
 }
 
 function Load-Config {
@@ -82,6 +83,10 @@ try { $SearchDepth = [Math]::Max(1, [int]$cfg.SearchDepth) } catch { $SearchDept
 $ExcludeFolders   = @($cfg.ExcludeFolders)
 $ClaudeCommand    = [string]$cfg.ClaudeCommand
 $ChromeUrlPattern = [string]$cfg.ChromeUrlPattern
+$HideAutomatedSessions = [bool]$cfg.HideAutomatedSessions
+
+# Lecture des sessions Claude Code locales (fonctions sans UI)
+. (Join-Path $ScriptDir "ClaudeSessions.ps1")
 
 # ===== Tray icon ================================================
 $notify = New-Object System.Windows.Forms.NotifyIcon
@@ -95,6 +100,7 @@ $notify.Visible = $true
 
 $menu     = New-Object System.Windows.Forms.ContextMenuStrip
 $mOpen    = $menu.Items.Add("Ouvrir le launcher")
+$mSessions = $menu.Items.Add("Sessions Claude")
 $mRoot    = $menu.Items.Add("Ouvrir $ProjectsRoot")
 $mLocal   = $menu.Items.Add("Ouvrir http://127.0.0.1 dans Chrome")
 $mRefresh = $menu.Items.Add("Rafraichir la liste")
@@ -114,7 +120,6 @@ $form.KeyPreview      = $true
 $form.BackColor       = [System.Drawing.Color]::FromArgb(245, 245, 245)
 
 $label = New-Object System.Windows.Forms.Label
-$label.Text     = "Entree = Claude  -  Ctrl+Entree = Chrome  -  Shift+Entree = Explorateur  -  Echap = fermer"
 $label.Location = New-Object System.Drawing.Point(12, 8)
 $label.Size     = New-Object System.Drawing.Size(490, 18)
 $label.ForeColor = [System.Drawing.Color]::Gray
@@ -143,6 +148,14 @@ $colorRowOdd  = [System.Drawing.Color]::FromArgb(245, 245, 245)   # gris clair
 $colorSelBg   = [System.Drawing.Color]::FromArgb(204, 120, 92)    # coral Claude
 $colorSelFg   = [System.Drawing.Color]::White
 $colorText    = [System.Drawing.Color]::FromArgb(35, 35, 35)
+$colorMeta    = [System.Drawing.Color]::FromArgb(130, 130, 130)
+$colorMetaSel = [System.Drawing.Color]::FromArgb(255, 235, 225)
+$fontMeta     = New-Object System.Drawing.Font("Segoe UI", 9)
+
+# Texte sur une ligne, tronque avec "..." s'il deborde
+$fmtEllipsis = New-Object System.Drawing.StringFormat
+$fmtEllipsis.Trimming    = [System.Drawing.StringTrimming]::EllipsisCharacter
+$fmtEllipsis.FormatFlags = [System.Drawing.StringFormatFlags]::NoWrap
 
 $listbox.Add_DrawItem({
     param($s, $e)
@@ -165,16 +178,25 @@ $listbox.Add_DrawItem({
     $e.Graphics.FillRectangle($brushBg, $e.Bounds)
     $brushBg.Dispose()
 
-    # Texte avec padding gauche
-    $text = [string]$listbox.Items[$e.Index].Display
+    $item = $listbox.Items[$e.Index]
+    $x    = [single]($e.Bounds.X + 10)
+    $w    = [single]($e.Bounds.Width - 20)
+
+    # Session : "projet - il y a 2 h" en gris a droite, titre tronque a gauche
+    if ($item.Kind -eq 'session') {
+        $meta      = "$($item.Project)  -  $(Format-RelativeDate $item.LastActivity)"
+        $metaW     = [Math]::Min($w * 0.45, $e.Graphics.MeasureString($meta, $fontMeta).Width + 4)
+        $brushMeta = New-Object System.Drawing.SolidBrush($(if ($isSelected) { $colorMetaSel } else { $colorMeta }))
+        $metaRect  = New-Object System.Drawing.RectangleF(([single]($x + $w - $metaW)), ([single]($e.Bounds.Y + 6)), ([single]$metaW), ([single]$e.Bounds.Height))
+        $e.Graphics.DrawString($meta, $fontMeta, $brushMeta, $metaRect, $fmtEllipsis)
+        $brushMeta.Dispose()
+        $w = [single]($w - $metaW - 8)
+    }
+
+    # Texte principal avec padding gauche
     $brushFg = New-Object System.Drawing.SolidBrush($fg)
-    $textRect = New-Object System.Drawing.RectangleF(
-        ([single]($e.Bounds.X + 10)),
-        ([single]($e.Bounds.Y + 5)),
-        ([single]($e.Bounds.Width - 10)),
-        ([single]($e.Bounds.Height))
-    )
-    $e.Graphics.DrawString($text, $listbox.Font, $brushFg, $textRect)
+    $textRect = New-Object System.Drawing.RectangleF($x, ([single]($e.Bounds.Y + 3)), $w, ([single]$e.Bounds.Height))
+    $e.Graphics.DrawString([string]$item.Display, $listbox.Font, $brushFg, $textRect, $fmtEllipsis)
     $brushFg.Dispose()
 })
 
@@ -204,13 +226,16 @@ function Refresh-Folders {
                 if ($_.FullName.TrimEnd('\') -ieq $selfDir -or
                     (Test-Path -LiteralPath (Join-Path $_.FullName 'ClaudeLauncher.ps1'))) { return }
                 $rel = if ($prefix) { "$prefix\$($_.Name)" } else { $_.Name }
+                $display = $(if ($SearchDepth -gt 1) { $rel } else { $_.Name })
                 $list.Add([PSCustomObject]@{
+                    Kind    = 'project'
                     Name    = $_.Name
                     Path    = $_.FullName
                     RelPath = $rel
                     # Avec SearchDepth > 1, on affiche le chemin relatif pour
                     # distinguer les homonymes (deux "src", deux "app"...).
-                    Display = $(if ($SearchDepth -gt 1) { $rel } else { $_.Name })
+                    Display    = $display
+                    SearchText = $display
                 })
                 if ($level -lt $SearchDepth) { & $walk $_.FullName ($level + 1) $rel }
             }
@@ -220,18 +245,33 @@ function Refresh-Folders {
     $script:AllFolders = @($list | Sort-Object Display)
 }
 
+$script:AllSessions = @()
+$script:Mode        = 'projects'   # 'projects' ou 'sessions' (Tab pour basculer)
+
+function Refresh-Sessions {
+    $status.Text = "Chargement des sessions Claude..."
+    $status.Refresh()
+    $script:AllSessions = Get-ClaudeSessions -HideAutomated:$HideAutomatedSessions
+}
+
+function Get-CurrentItems {
+    if ($script:Mode -eq 'sessions') { return $script:AllSessions } else { return $script:AllFolders }
+}
+
 function Update-List {
     param([string]$Filter)
+    $all = @(Get-CurrentItems)
     $listbox.BeginUpdate()
     try {
         $listbox.Items.Clear()
         $needle = $Filter.Trim()
         if ([string]::IsNullOrEmpty($needle)) {
-            $found = $script:AllFolders
+            $found = $all
         } else {
-            # Recherche litterale (pas de -like : "[" ou "*" casseraient le filtre)
-            $found = $script:AllFolders | Where-Object {
-                $_.Display.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+            # Recherche litterale (pas de -like : "[" ou "*" casseraient le filtre).
+            # Sessions : titre, projet, branche, premier et dernier message.
+            $found = $all | Where-Object {
+                $_.SearchText.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
             }
         }
         foreach ($m in $found) { [void]$listbox.Items.Add($m) }
@@ -239,7 +279,35 @@ function Update-List {
     } finally {
         $listbox.EndUpdate()
     }
-    $status.Text = "$($listbox.Items.Count) dossier(s)  /  total: $($script:AllFolders.Count)"
+    Update-Status
+}
+
+function Update-Status {
+    $what = if ($script:Mode -eq 'sessions') { 'session(s)' } else { 'dossier(s)' }
+    $text = "$($listbox.Items.Count) $what  /  total: $(@(Get-CurrentItems).Count)"
+    $entry = Get-SelectedEntry
+    if ($entry -and $entry.Kind -eq 'session') {
+        # Detail de la session selectionnee : branche et date exacte
+        $branch = if ($entry.Branch -and $entry.Branch -ne 'HEAD') { "$($entry.Branch)  -  " } else { '' }
+        $text = "$text   |   $branch$($entry.LastActivity.ToString('dd/MM/yyyy HH:mm'))"
+    }
+    $status.Text = $text
+}
+
+function Set-Mode {
+    param([string]$Mode)
+    $script:Mode = $Mode
+    if ($Mode -eq 'sessions') {
+        Refresh-Sessions
+        $label.Text = "SESSIONS  -  Entree = reprendre  -  Shift+Entree = Explorateur  -  Tab = projets"
+        $form.Text  = "Claude Launcher - sessions"
+    } else {
+        $label.Text = "Entree = Claude  -  Ctrl+Entree = Chrome  -  Shift+Entree = Explorateur  -  Tab = sessions"
+        $form.Text  = "Claude Launcher"
+    }
+    # Le texte tape est conserve : taper "naturhouse" puis Tab montre les
+    # sessions de ce projet.
+    Update-List $textbox.Text
 }
 
 function Get-SelectedEntry {
@@ -247,26 +315,44 @@ function Get-SelectedEntry {
     return $listbox.SelectedItem
 }
 
-function Launch-Selected {
-    $entry = Get-SelectedEntry
-    if (-not $entry) { return }
-    $path = $entry.Path
+function Get-SessionCommand {
+    param($Entry)
+    # L'id vient du nom de fichier (GUID) : pas de caractere a echapper
+    return "$ClaudeCommand --resume $($Entry.Id)"
+}
 
+function Start-ClaudeIn {
+    param([string]$Path, [string]$Command)
     $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
     if ($wt) {
-        # Windows Terminal : ouvre un onglet PowerShell dans le dossier et lance claude.
+        # Windows Terminal : ouvre un onglet PowerShell dans le dossier et lance la commande.
         # wt interprete ";" comme separateur de commandes : on l'echappe en "\;".
-        $cmd = $ClaudeCommand -replace ';', '\;'
+        $cmd = $Command -replace ';', '\;'
         Start-Process -FilePath "wt.exe" -ArgumentList @(
-            "-d", "`"$path`"",
+            "-d", "`"$Path`"",
             "powershell.exe", "-NoExit", "-Command", $cmd
         )
     } else {
         # Le dossier est passe via -WorkingDirectory : aucun souci d'apostrophe
         # ou de caractere special dans le chemin.
-        Start-Process -FilePath "powershell.exe" -WorkingDirectory $path -ArgumentList @(
-            "-NoExit", "-Command", $ClaudeCommand
+        Start-Process -FilePath "powershell.exe" -WorkingDirectory $Path -ArgumentList @(
+            "-NoExit", "-Command", $Command
         )
+    }
+}
+
+function Launch-Selected {
+    $entry = Get-SelectedEntry
+    if (-not $entry) { return }
+    if ($entry.Kind -eq 'session') {
+        # Claude ne retrouve une session que depuis son dossier d'origine
+        if (-not (Test-Path -LiteralPath $entry.Path)) {
+            $status.Text = "Dossier introuvable : $($entry.Path)"
+            return
+        }
+        Start-ClaudeIn -Path $entry.Path -Command (Get-SessionCommand $entry)
+    } else {
+        Start-ClaudeIn -Path $entry.Path -Command $ClaudeCommand
     }
     $form.Hide()
 }
@@ -305,9 +391,19 @@ function Start-Chrome {
 function Open-InChrome {
     $entry = Get-SelectedEntry
     if (-not $entry) { return }
+    $rel = $entry.RelPath
+    if ($entry.Kind -eq 'session') {
+        # Session : URL du projet si son dossier est sous ProjectsRoot
+        $root = $ProjectsRoot.TrimEnd('\') + '\'
+        if (-not $entry.Path -or -not $entry.Path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $status.Text = "Ce dossier n'est pas sous $ProjectsRoot"
+            return
+        }
+        $rel = $entry.Path.Substring($root.Length).TrimEnd('\')
+    }
     # Pattern issu de config.json : {name} est remplace par le chemin relatif
     # du dossier (segments encodes pour l'URL, separateur "/").
-    $urlPath = ($entry.RelPath -split '\\' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+    $urlPath = ($rel -split '\\' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
     $url     = $ChromeUrlPattern.Replace('{name}', $urlPath)
     Start-Chrome -Url $url
     $form.Hide()
@@ -316,14 +412,19 @@ function Open-InChrome {
 function Open-InExplorer {
     $entry = Get-SelectedEntry
     if (-not $entry) { return }
+    if (-not (Test-Path -LiteralPath $entry.Path)) {
+        $status.Text = "Dossier introuvable : $($entry.Path)"
+        return
+    }
     Start-Process explorer.exe "`"$($entry.Path)`""
     $form.Hide()
 }
 
 function Show-Launcher {
+    param([string]$Mode = 'projects')
     Refresh-Folders
     $textbox.Text = ""
-    Update-List ""
+    Set-Mode $Mode
     # Place la fenetre en bas a droite de l'ecran ou se trouve la souris
     # (= celui de la traybar cliquee, utile en multi-ecran)
     $wa = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
@@ -338,6 +439,15 @@ function Show-Launcher {
 
 # ===== Events ===================================================
 $textbox.Add_TextChanged({ Update-List $textbox.Text })
+$listbox.Add_SelectedIndexChanged({ Update-Status })
+
+# Tab est normalement consomme par WinForms pour changer de controle avant
+# tout KeyDown : on le declare "touche d'entree" pour le recevoir.
+$tabAsInput = {
+    if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Tab) { $_.IsInputKey = $true }
+}
+$textbox.Add_PreviewKeyDown($tabAsInput)
+$listbox.Add_PreviewKeyDown($tabAsInput)
 
 # Gestion clavier au niveau du formulaire (KeyPreview=$true plus haut) :
 # le formulaire intercepte la touche AVANT que la TextBox/ListBox la voie.
@@ -356,6 +466,13 @@ $form.Add_KeyDown({
         } else {
             Launch-Selected    # Entree       => PowerShell + claude dans le dossier
         }
+    }
+    elseif ($k -eq $Keys::Tab) {
+        # Tab => bascule projets <-> sessions Claude
+        $_.Handled = $true
+        $_.SuppressKeyPress = $true
+        Set-Mode $(if ($script:Mode -eq 'sessions') { 'projects' } else { 'sessions' })
+        [void]$textbox.Focus()
     }
     elseif ($k -eq $Keys::Escape) {
         $_.Handled = $true
@@ -384,6 +501,7 @@ $form.Add_KeyDown({
 $listbox.Add_DoubleClick({ Launch-Selected })
 
 # Clic droit sur un element : le selectionne et copie son chemin complet
+# (session : la commande de reprise "claude --resume <id>")
 $listbox.Add_MouseDown({
     param($s, $e)
     if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Right) { return }
@@ -393,6 +511,12 @@ $listbox.Add_MouseDown({
     $entry = $listbox.Items[$idx]
     if (-not $entry) { return }
     try {
+        if ($entry.Kind -eq 'session') {
+            $cmd = Get-SessionCommand $entry
+            [System.Windows.Forms.Clipboard]::SetText($cmd)
+            $status.Text = "Commande copiee : $cmd"
+            return
+        }
         [System.Windows.Forms.Clipboard]::SetText($entry.Path)
         $status.Text = "Chemin copie : $($entry.Path)"
     } catch {
@@ -416,9 +540,15 @@ $notify.Add_MouseClick({
 })
 
 $mOpen.Add_Click({ Show-Launcher })
+$mSessions.Add_Click({ Show-Launcher -Mode 'sessions' })
 $mRoot.Add_Click({ Start-Process explorer.exe "`"$ProjectsRoot`"" })
 $mLocal.Add_Click({ Start-Chrome -Url "http://127.0.0.1" })
-$mRefresh.Add_Click({ Refresh-Folders; $status.Text = "Liste rafraichie ($($script:AllFolders.Count) dossiers)" })
+$mRefresh.Add_Click({
+    Refresh-Folders
+    if ($script:Mode -eq 'sessions') { Refresh-Sessions }
+    Update-List $textbox.Text
+    $status.Text = "Liste rafraichie ($($script:AllFolders.Count) dossiers)"
+})
 $mExit.Add_Click({
     $notify.Visible = $false
     $notify.Dispose()

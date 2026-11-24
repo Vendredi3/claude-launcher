@@ -27,8 +27,11 @@ folder name, hit `Enter`. Done.
 - **`Shift+Enter`** opens the selected folder in Windows Explorer.
 - **Right-click** an item to copy its full path to the clipboard.
 - **Single instance** — launching it twice won't give you two tray icons.
+- **Claude sessions** — `Tab` switches to the list of your local Claude Code
+  sessions (most recent first): search them by title, project, branch or
+  prompt, and `Enter` resumes one (`claude --resume`) in its own folder.
 - **External JSON config** — root folder, exclusions, command, URL pattern.
-- **No dependencies** — pure PowerShell + WinForms. ~430 lines, single file.
+- **No dependencies** — pure PowerShell + WinForms. Two script files.
 
 ## Install
 
@@ -68,11 +71,37 @@ folder name, hit `Enter`. Done.
 | `Ctrl+Enter`         | Open Chrome on `http://127.0.0.1/<folder-name>` (URL pattern configurable). |
 | `Shift+Enter`        | Open the selected folder in Windows Explorer.                           |
 | Right-click an item  | Select it and copy its full path to the clipboard.                      |
+| `Tab`                | Switch between projects and Claude sessions (the typed filter is kept). |
 | `Escape` / click out | Hide the window (app stays in the tray).                                |
+
+### Claude sessions
+
+Press `Tab` (or pick **Sessions Claude** in the tray menu) to list the Claude
+Code sessions stored on this machine (`~\.claude\projects`, or
+`$CLAUDE_CONFIG_DIR\projects`), most recent first. Each row shows the session
+title (your `/rename`, else Claude's auto title, else the first prompt), the
+project folder and when it was last active. The status bar shows the git
+branch and exact date of the selected session.
+
+The filter searches the title, project name, branch, first and last prompt —
+so typing a project name then `Tab` lists that project's sessions.
+
+| Key                  | Action (sessions mode)                                                  |
+|----------------------|-------------------------------------------------------------------------|
+| `Enter`              | Resume the session: `claude --resume <id>` in the session's folder.     |
+| `Ctrl+Enter`         | Open the project URL in Chrome (if the folder is under `ProjectsRoot`). |
+| `Shift+Enter`        | Open the session's folder in Windows Explorer.                          |
+| Right-click an item  | Copy the `claude --resume <id>` command to the clipboard.               |
+
+Sessions started by scripts (`claude -p`, entrypoint `sdk-cli`) are hidden by
+default. Only the beginning and the end of each session file are read, and
+results are cached until the file changes, so the list opens quickly even with
+large histories.
 
 **Right-click** the tray icon for the menu:
 
 - Open the launcher
+- Claude sessions
 - Open the root folder in Explorer
 - Open `http://127.0.0.1` in Chrome
 - Refresh the project list
@@ -90,7 +119,8 @@ Copy it (or let the script auto-create one) and edit freely:
     "SearchDepth":      1,
     "ExcludeFolders":   [".git", "node_modules", "vendor"],
     "ClaudeCommand":    "claude",
-    "ChromeUrlPattern": "http://127.0.0.1/{name}"
+    "ChromeUrlPattern": "http://127.0.0.1/{name}",
+    "HideAutomatedSessions": true
 }
 ```
 
@@ -101,6 +131,7 @@ Copy it (or let the script auto-create one) and edit freely:
 | `ExcludeFolders`   | Folder names to skip (matched by basename, not path). Excluded folders are not descended into. The launcher's own folder is always skipped. |
 | `ClaudeCommand`    | Command to run after `cd`-ing into the project. Defaults to `claude`. Could be `code .`, `gemini`, `cursor .`, etc. |
 | `ChromeUrlPattern` | URL opened by `Ctrl+Enter`. The placeholder `{name}` is replaced by the folder's path relative to `ProjectsRoot`, URL-encoded, with `/` separators. |
+| `HideAutomatedSessions` | `true` (default) hides sessions started by scripts (`claude -p`) from the sessions list. |
 
 If `config.json` is missing, it's created from defaults on next run. If the
 JSON is invalid, you get a non-blocking warning and the defaults are used.
@@ -113,6 +144,7 @@ then relaunch `Start-Hidden.vbs`) to apply changes.
 ```
 claude-launcher/
 ├── ClaudeLauncher.ps1      # main script (tray app, search window, keybindings)
+├── ClaudeSessions.ps1      # reads local Claude Code sessions (no UI)
 ├── config.example.json     # template — copy to config.json on first install
 ├── config.json             # your settings (git-ignored, auto-created if missing)
 ├── icon.ico                # tray icon (Claude-style spark + lightning bolt)
@@ -147,6 +179,7 @@ the usual Chrome install paths and falls back to the default browser.
 |------------------------------------------|-------------------------------------------------------------------------------|
 | Tray icon doesn't appear after launch    | Run `Start-Debug.bat` to see the error in a visible console.                  |
 | "Running scripts is disabled on this system" | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` in PowerShell.       |
+| Sessions list: "Dossier introuvable"     | The session's folder was moved or deleted (e.g. a removed worktree). Claude can only resume a session from its original folder. |
 | `claude` is not recognized               | Make sure `claude` works from a normal PowerShell session first. Add to `PATH`. |
 | Icon file is fine on disk but the tray shows the old one | Windows icon cache. Run `Stop-Process -Name explorer -Force; Start-Process explorer`. |
 | Selection in list looks weird            | The list uses `DrawMode = OwnerDrawFixed`. Visual style is hardcoded in `ClaudeLauncher.ps1`. |
